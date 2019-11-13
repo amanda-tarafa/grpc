@@ -35,6 +35,8 @@ namespace Grpc.Auth
         private const string AuthorizationHeader = "Authorization";
         private const string Schema = "Bearer";
 
+        private const string QuotaProjectIdHeader = "x-goog-user-project";
+
         /// <summary>
         /// Creates an <see cref="AsyncAuthInterceptor"/> that will obtain access token from any credential type that implements
         /// <c>ITokenAccess</c>. (e.g. <c>GoogleCredential</c>).
@@ -43,29 +45,22 @@ namespace Grpc.Auth
         /// <returns>The interceptor.</returns>
         public static AsyncAuthInterceptor FromCredential(ITokenAccess credential)
         {
-            if(credential is ITokenAccessWithExtraInformation credentialWithExtra)
+            AsyncAuthInterceptor interceptors = new AsyncAuthInterceptor(async (context, metadata) => 
             {
-                return FromCredential(credentialWithExtra);
-            }
-            
-            return new AsyncAuthInterceptor(async (context, metadata) =>
-            {
-                await AddBearerTokenHeader(credential, context, metadata).ConfigureAwait(false);
+                var accessToken = await credential.GetAccessTokenForRequestAsync(context.ServiceUrl, CancellationToken.None).ConfigureAwait(false);
+                metadata.Add(CreateBearerTokenHeader(accessToken));
             });
-        }
 
-        /// <summary>
-        /// Creates an <see cref="AsyncAuthInterceptor"/> that will obtain access token and associated information
-        /// from any credential type that implements <c>ITokenAccessWithExtraInformation</c>.
-        /// </summary>
-        /// <param name="credential">The credential to use to obtain access tokens.</param>
-        /// <returns>The interceptor.</returns>
-        public static AsyncAuthInterceptor FromCredential(ITokenAccessWithExtraInformation credential)
-        {
-            return new AsyncAuthInterceptor(async (context, metadata) => {
-                await AddBearerTokenHeader(credential, context, metadata).ConfigureAwait(false);
-                AddExtraInforHeaders(credential, context, metadata);
-            });
+            if (credential is IProjectImpersonatorTokenAccess impersonator)
+            {
+                interceptors += new AsyncAuthInterceptor((context, metadata) => 
+                {
+                    metadata.Add(CreateHeader(QuotaProjectIdHeader, impersonator.QuotaProjectId));
+                    return GetCompletedTask();
+                });
+            }
+
+            return interceptors;
         }
 
         /// <summary>
@@ -83,26 +78,12 @@ namespace Grpc.Auth
             });
         }
 
-        private static async Task AddBearerTokenHeader(ITokenAccess credential, AuthInterceptorContext context, Metadata metadata)
-        {
-            var accessToken = await credential.GetAccessTokenForRequestAsync(context.ServiceUrl, CancellationToken.None).ConfigureAwait(false);
-            metadata.Add(CreateBearerTokenHeader(accessToken));
-        }
-
         private static Metadata.Entry CreateBearerTokenHeader(string accessToken)
         {
             return new Metadata.Entry(AuthorizationHeader, Schema + " " + accessToken);
         }
 
-        private static void AddExtraInforHeaders(ITokenAccessWithExtraInformation credential, AuthInterceptorContext context, Metadata metadata)
-        {
-            foreach(var info in credential.ExtraInformation)
-            {
-                metadata.Add(CreateExtraInfoHeader(info.Key, info.Value));
-            }
-        }
-
-        private static Metadata.Entry CreateExtraInfoHeader(string key, string value)
+        private static Metadata.Entry CreateHeader(string key, string value)
         {
             return new Metadata.Entry(key, value);
         }
